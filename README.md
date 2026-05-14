@@ -360,7 +360,7 @@ Geomagnetic activity changes seasonally, across solar cycles, and across storm i
 ```
 geomagnetic-storm-prediction/
 ├── data/
-│   ├── raw/                              # Raw OMNI/NOAA data (1995–2017)
+│   ├── raw/                              # classification_columns.feather data (1995–2017)
 │   ├── processed/
 │   │   ├── storm_windows/               # Per-year storm event windows (Track A)
 │   │   └── quiet_windows/               # Per-year quiet-period windows (Track B)
