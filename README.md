@@ -1,372 +1,437 @@
-# Cross-Year Geomagnetic Storm Prediction Using Machine Learning
-## Under Distributional Shift — 1995 to 2017
+# 🌌 Cross-Year Geomagnetic Storm Prediction
+
+### Using Machine Learning, Deep Learning, and Self-Supervised Representation Learning
+
+> Forecasting geomagnetic storm intensity across solar cycles (1995–2017) using dBHt as the primary regression target
 
 ---
 
-## Research Objective
+## 📋 Project Overview
 
-Develop machine learning models capable of predicting geomagnetic storms across multiple years (1995–2017) despite rare event sparsity, nonstationary time-series behaviour, solar-cycle variation, and distributional shift between training and deployment years.
+This project develops and benchmarks a progression of machine learning, deep learning, and self-supervised learning models to forecast geomagnetic storm intensity across 22 years of solar-cycle variability. The dataset spans Solar Cycles 22–24 (1995–2017), covering approximately **12 million rows** of multivariate time-series observations across **24 features**.
 
----
-
-## Core Research Questions
-
-1. Can models trained on one year successfully predict storms in other years?
-2. Which model families generalise best across years?
-3. How severe is distributional shift between years, and does it correlate with prediction failure?
-4. Do tree-based models (XGBoost, RF) outperform sequence models (LSTM, GRU) under shift?
-5. Does solar-cycle phase (minimum / rising / maximum / declining) affect cross-year transfer?
+The primary regression target is **dBHt** — the time derivative of the horizontal geomagnetic field intensity (nT/min). Models are evaluated not only on forecast accuracy but on cross-year generalization, distributional shift robustness, and operational stability during geomagnetically quiet periods.
 
 ---
 
-## Study Period
+## 🔬 Core Research Questions
 
-**Years covered:** 1995 – 2017 (23 years)
-
-| Solar Cycle | Phase | Years |
-|---|---|---|
-| Cycle 22 tail | Declining / minimum | 1995 – 1996 |
-| Cycle 23 | Rising → maximum → declining | 1997 – 2007 |
-| Cycle 23/24 minimum | Deep minimum | 2008 – 2009 |
-| Cycle 24 | Rising → maximum → declining | 2010 – 2017 |
-
-Notable storms included in the dataset:
-
-- **1998-05-04** — Dst −205 nT
-- **2000-07-15** — Bastille Day storm, Dst −301 nT
-- **2001-03-31** — Dst −387 nT
-- **2003-10-29** — Halloween storm, Dst −383 nT
-- **2004-11-07** — Dst −373 nT
-- **2015-03-17** — St. Patrick's Day storm, Dst −223 nT (primary case study)
+1. Can machine learning models predict geomagnetic storm intensity across unseen years?
+2. How does distributional shift affect forecasting performance across solar-cycle phases?
+3. Which model architectures generalize best under solar-cycle variability?
+4. Can models remain operationally stable during non-storm quiet conditions?
+5. Can self-supervised representation learning (JEPA) improve robustness under temporal drift?
 
 ---
 
-## Storm Window Construction
+## 📊 Dataset
 
-For each identified storm event, extract:
-
-```
-[  7 days pre-onset  ]  [  storm duration  ]  [  3 days recovery  ]
-       quiet / precursor    main phase + SSC        gradual recovery
-```
-
-This captures quiet background, precursor solar wind signatures, sudden storm commencement (SSC), main phase injection, and ring current decay — giving the model realistic deployment context rather than only peak conditions.
-
-Each yearly dataset contains both storm windows and background quiet periods to preserve the natural class imbalance.
-
----
-
-## Data Pipeline
-
-```
-Step 1 — Storm Catalog
-    Source Dst/Kp indices (OMNIWeb, WDC Kyoto)
-    Threshold: Dst < −50 nT  (moderate)  |  Dst < −100 nT  (intense)
-    Output: catalog of storm onset / peak / recovery timestamps per year
-
-Step 2 — Yearly Dataset Extraction
-    For each year: extract storm windows + matched quiet periods
-    Save as:  data/yearly/storm_YYYY.csv
-
-Step 3 — Preprocessing
-    Parse Date_UTC, sort chronologically
-    Remove cross-hemisphere columns
-    Interpolate short gaps (< 10 min) linearly
-    Flag and record longer gaps
-
-Step 4 — Feature Engineering
-    (see Feature Engineering section below)
-
-Step 5 — Cross-Year Experiment Framework
-    Train on year A → evaluate on all other years B
-    506 total train/test year-pair evaluations
-```
-
----
-
-## Features
-
-### Raw solar wind and IMF inputs
-
-| Feature | Description | Unit |
-|---|---|---|
-| `B_Total` | IMF total magnitude | nT |
-| `BX_GSE` | IMF X component (GSE) | nT |
-| `BY_GSM` | IMF Y component (GSM) | nT |
-| `BZ_GSM` | IMF Z component (GSM) — primary storm driver | nT |
-| `flow_speed` | Solar wind bulk speed | km/s |
-| `Pressure` | Solar wind dynamic pressure | nPa |
-| `E_Field` | Interplanetary electric field | mV/m |
-| `SYM_H` | High-resolution ring current index (≈ Dst) | nT |
-| `AE_INDEX` | Auroral electrojet activity | nT |
-| `dBHt` | Rate of change of horizontal field — **primary target** | nT/min |
-| `sinMLT`, `cosMLT` | Magnetic local time (circular encoding) | — |
-
-### Engineered features
-
-```python
-# Autoregressive lag features (physical momentum / curvature)
-dBHt_t1       = dBHt.shift(1)     # momentum: where was the field 1 min ago?
-dBHt_t2       = dBHt.shift(2)     # curvature: is the disturbance accelerating?
-
-# Rolling statistics
-dBHt_roll_mean_5   = dBHt.rolling(5).mean()
-dBHt_roll_std_15   = dBHt.rolling(15).std()
-dBHt_roll_max_30   = dBHt.abs().rolling(30).max()
-
-# Solar wind coupling functions
-Ey_coupling    = -flow_speed * BZ_GSM / 1000        # dawn-dusk E field (mV/m)
-Ey_south       = Ey_coupling.clip(lower=0)           # only southward drives storm
-BZ_cumint      = BZ_GSM.clip(upper=0).cumsum()       # cumulative southward BZ
-BZ_roll_min_30 = BZ_GSM.rolling(30).min()
-
-# Ring current state
-dSYMH_dt       = SYM_H.diff()                        # injection rate
-dSYMH_dt_lag1  = dSYMH_dt.shift(1)
-
-# Prediction targets
-dBHt_t_plus1   = dBHt.shift(-1)                      # 1-min-ahead regression
-extreme_next   = (dBHt_t_plus1.abs() > p95).astype(int)   # classification
-```
-
----
-
-## Experimental Framework
-
-### Cross-year train/test design
-
-Train on a single year → test on all other 22 years. Repeat for every year.
-
-```
-Train 1995  →  Test: 1996 1997 1998 ... 2017       (22 evaluations)
-Train 1996  →  Test: 1995 1997 1998 ... 2017       (22 evaluations)
-...
-Train 2017  →  Test: 1995 1996 1997 ... 2016       (22 evaluations)
-
-Total: 23 × 22 = 506 train/test evaluations
-```
-
-**Critical rule:** No random shuffling. All splits are strictly chronological within and across years.
-
-### Validation within a training year
-
-```
-|-- 70% train --|-- 15% val --|-- 15% holdout --|
-                                 (chronological)
-```
-
----
-
-## Models
-
-### Baseline (tree-based and linear)
-
-| Model | Key hyperparameter | Notes |
-|---|---|---|
-| Logistic Regression | `C`, `class_weight='balanced'` | Linear boundary baseline |
-| Decision Tree | `max_depth`, `min_samples_leaf` | Interpretable; §8.1 |
-| Random Forest | `n_estimators`, `max_features='sqrt'` | §8.2.2 |
-| XGBoost | `n_estimators`, `learning_rate`, `max_depth` | Often best on tabular |
-| LightGBM | `num_leaves`, `min_data_in_leaf` | Faster than XGBoost |
-| CatBoost | `depth`, `l2_leaf_reg` | Handles categorical natively |
-
-### Deep learning (sequence models)
-
-| Model | Input window | Notes |
-|---|---|---|
-| LSTM | 30–60 min | Captures temporal dependencies |
-| Bidirectional LSTM | 30–60 min | Sees past and future context (non-causal) |
-| GRU | 30–60 min | Lighter than LSTM, similar performance |
-| CNN-LSTM | 30–60 min | CNN extracts local patterns, LSTM integrates |
-| Attention-LSTM | 30–60 min | Learn which minutes matter most |
-
-**Note on deep learning for this task:** Tree-based models often match or outperform LSTMs on 1-min tabular data when lag features are properly engineered. Train both and compare.
-
----
-
-## Handling Class Imbalance
-
-Extreme storm minutes are typically < 5% of all observations. Strategies:
-
-```python
-# Option 1 — Class weights (all sklearn/XGBoost models)
-model = XGBClassifier(scale_pos_weight = n_negatives / n_positives)
-
-# Option 2 — SMOTE oversampling (training set only, never test)
-from imblearn.over_sampling import SMOTE
-X_res, y_res = SMOTE(random_state=42).fit_resample(X_train, y_train)
-
-# Option 3 — Threshold tuning (post-training)
-# Move decision boundary from 0.5 to optimise F1 or recall on val set
-
-# Option 4 — PR-AUC as primary metric (better than ROC-AUC under imbalance)
-from sklearn.metrics import average_precision_score
-pr_auc = average_precision_score(y_test, y_prob)
-```
-
----
-
-## Evaluation Metrics
-
-### Classification (extreme event prediction)
-
-| Metric | Why it matters here |
+| Property | Detail |
 |---|---|
-| **PR-AUC** | Primary metric — robust to class imbalance |
-| **F1-score** | Balance of precision and recall |
-| Recall (storm detection rate) | Missing a storm is costly — prioritise high recall |
-| Precision | Controls false alarm rate |
-| False alarm rate | Operational cost — too many alarms cause alert fatigue |
-| ROC-AUC | Secondary; can be misleading under imbalance |
+| **Size** | ~12 million rows |
+| **Features** | 24 multivariate time-series inputs |
+| **Temporal span** | 1995–2017 (Solar Cycles 22, 23, 24) |
+| **Structure** | Continuous temporal observations |
+| **Target variable** | `dBHt` (nT/min) |
 
-### Regression (dBHt magnitude prediction)
+---
 
-| Metric | Notes |
+## 🎯 Primary Target Variable
+
+| Variable | Description |
 |---|---|
-| RMSE (overall) | General accuracy |
-| RMSE (extremes only, \|dBHt\| > p95) | Performance where GIC risk is real |
-| Skill score vs persistence | Does model beat "predict same as last minute"? |
+| `dBHt` | Rate of change of horizontal geomagnetic field intensity (nT/min) — primary regression target |
 
 ---
 
-## Distributional Shift Analysis
+## 📡 Input Features
 
-For each train/test year pair, measure how different the feature distributions are.
+| Feature | Description | Category |
+|---|---|---|
+| `dBHt_t1` | dBHt lagged 1 step | Autoregressive lag |
+| `dBHt_t2` | dBHt lagged 2 steps | Autoregressive lag |
+| `BZ_GSM` | North-south IMF component (GSM frame) | Interplanetary magnetic field |
+| `flow_speed` | Solar wind bulk flow speed (km/s) | Solar wind |
+| `Pressure` | Solar wind dynamic pressure (nPa) | Solar wind |
+| `E_Field` | Interplanetary electric field (mV/m) | Solar wind coupling |
+| `SYM_H` | Symmetric ring current index — proxy for Dst | Geomagnetic index |
+| `AE_INDEX` | Auroral electrojet activity index | Geomagnetic index |
+| `sinMLT` | Sine of magnetic local time | Temporal/cyclic encoding |
+| `cosMLT` | Cosine of magnetic local time | Temporal/cyclic encoding |
 
-```python
-from scipy.stats import wasserstein_distance
-from scipy.special import kl_div
-
-# For each feature f, for year pair (A, B):
-# 1. Histogram comparison — visual inspection
-# 2. KL divergence       — how much info is lost encoding B using A's distribution
-# 3. Wasserstein distance — "earth mover's" distance between distributions
-# 4. PSI (Population Stability Index):
-#    PSI = sum((actual_pct - expected_pct) * ln(actual_pct / expected_pct))
-#    PSI < 0.1  : stable
-#    PSI 0.1–0.2: slight shift
-#    PSI > 0.2  : significant shift
-
-# Correlate shift magnitude with prediction performance drop:
-# Does high Wasserstein(BZ_GSM, year_A, year_B) → low PR-AUC?
-```
+> **Note on MLT encoding:** Magnetic Local Time is cyclic. Encoding as `sin(MLT)` / `cos(MLT)` ensures models
+> correctly understand that 23:00 and 01:00 are adjacent — not 22 hours apart.
 
 ---
 
-## Solar Cycle Analysis
+## 🌡️ Storm Severity Classification (NOAA-Inspired dBHt Scale)
 
-Group all 506 experiments by the solar cycle phase of the **test year**:
+| Category | dBHt Range (nT/min) | NOAA Equivalent | Frequency per Solar Cycle |
+|---|---:|---|---|
+| **Minor** | 0 – 100 | G1 | ~1700 events |
+| **Moderate** | 100 – 250 | G2 | ~600 events |
+| **Strong** | 250 – 400 | G3 | ~200 events |
+| **Severe / Extreme** | > 400 | G4–G5 | ~100–4 events |
 
-```
-Phase           Years               Expected behaviour
-──────────────────────────────────────────────────────────────────
-Solar minimum   1995–1996, 2008–2009   Few storms, quiet baseline easy
-Rising phase    1997–2000, 2010–2012   Increasing storm frequency
-Solar maximum   2000–2002, 2013–2015   Most intense storms
-Declining phase 2003–2007, 2016–2017   High-speed stream storms
-```
+These categories support both regression benchmarking and operational storm classification tasks.
 
-Key question: does training on a maximum year transfer well to a minimum year, and vice versa?
-
----
-
-## Validation Strategy
-
-```
-1. Chronological splitting only
-   — Never shuffle rows from a time series
-
-2. Rolling validation (within a year)
-   — Expand training window forward month by month
-
-3. Walk-forward validation (across years)
-   — Train 1995 → test 1996
-   — Train 1995+1996 → test 1997
-   — Continue accumulating
-
-4. Leave-one-year-out
-   — Full 506 cross-year matrix
-```
+> **Key challenge:** The 1995 training anchor is 98.98 nT/min (Minor). The model must generalize to
+> 761.12 nT/min (2003 Halloween Storm — Severe/Extreme): an ~8× extrapolation beyond training range.
 
 ---
 
-## Project Structure
+## 🌀 Storm Window Structure
+
+Each extracted event window contains four consecutive phases:
 
 ```
-geomagnetic_storm_project/
-│
+|← 10-day quiet →|← 48h pre-storm →|← Storm duration →|← 48h recovery →|
+```
+
+This structure preserves operational context and sequential temporal behavior surrounding each event.
+
+---
+
+## 🏗️ Pipeline Architecture
+
+All models are **trained once on the 1995 storm event**. From that single anchor, **22 independent year-pipelines** are executed — one per year from 1996 to 2017. Every pipeline runs both evaluation tracks.
+
+```
+Training Anchor: 1995 storm (dBHt = 98.98 nT/min — Minor / G1)
+        │
+        ├── Year Pipeline 1996
+        │       ├── Track A — Cross-Year Storm Prediction
+        │       └── Track B — Quiet-Period Operational Stability
+        │
+        ├── Year Pipeline 1997
+        │       ├── Track A — Cross-Year Storm Prediction
+        │       └── Track B — Quiet-Period Operational Stability
+        │
+        ├── ... (1998 through 2016)
+        │
+        └── Year Pipeline 2017
+                ├── Track A — Cross-Year Storm Prediction
+                └── Track B — Quiet-Period Operational Stability
+```
+
+### Track A — Cross-Year Storm Prediction
+
+| Component | Details |
+|---|---|
+| **Model** | Trained on 1995 storm (fixed — no retraining) |
+| **Test data** | Storm window from the target year |
+| **Window** | 10-day quiet + 48h pre-storm + storm duration + 48h post-storm recovery |
+| **Objective** | Measure generalization to unseen storm years |
+| **Output** | RMSE, MAE, R² per year per model |
+
+### Track B — Quiet-Period Operational Stability
+
+| Component | Details |
+|---|---|
+| **Model** | Same 1995-trained model (no retraining) |
+| **Test data** | Quietest January–April interval from the target year |
+| **Objective** | Confirm model does not produce false storm alerts during quiet conditions |
+| **Output** | False positive rate, prediction variance, quiet-period stability score |
+
+---
+
+## ♻️ Backtesting Framework
+
+The project uses **rolling-origin backtesting** to simulate real-world operational deployment:
+
+| Training Period | Testing Period |
+|---|---|
+| 1995 | 1996 |
+| 1995–1996 | 1997 |
+| 1995–1997 | 1998 |
+| … | … |
+| 1995–2016 | 2017 |
+
+This prevents temporal leakage and faithfully reproduces operational forecasting conditions.
+
+---
+
+## 📅 Year-by-Year Pipeline Overview
+
+| Year Pipeline | Peak Storm Date | Peak dBHt | Severity | NOAA | Solar Phase |
+|---|---|---:|---|:---:|---|
+| *1995 (train)* | *1995-04-07* | *98.98* | *Minor* | *G1* | *Declining (Cycle 22)* |
+| **Pipeline 1996** | 1996-10-23 | 86.05 | Minor | G1 | Solar minimum |
+| **Pipeline 1997** | 1997-11-23 | 102.82 | Moderate | G2 | Rising phase |
+| **Pipeline 1998** | 1998-05-04 | 619.99 | Severe/Extreme | G5 | Rising phase |
+| **Pipeline 1999** | 1999-09-22 | 243.86 | Moderate | G3 | Rising phase |
+| **Pipeline 2000** | 2000-07-15 | 466.08 | Severe/Extreme | G4 | Solar maximum |
+| **Pipeline 2001** | 2001-03-31 | 385.32 | Strong | G3 | Solar maximum |
+| **Pipeline 2002** | 2002-04-17 | 121.90 | Moderate | G2 | Solar maximum |
+| **Pipeline 2003** | 2003-10-29 | **761.12** | **Severe/Extreme** ⬅ Max | **G5** | Solar maximum |
+| **Pipeline 2004** | 2004-07-27 | 418.75 | Severe/Extreme | G4 | Declining phase |
+| **Pipeline 2005** | 2005-05-15 | 414.42 | Severe/Extreme | G4 | Declining phase |
+| **Pipeline 2006** | 2006-12-15 | 160.21 | Moderate | G2 | Declining phase |
+| **Pipeline 2007** | 2007-05-24 | 51.34 | Minor | G1 | Solar minimum |
+| **Pipeline 2008** | 2008-11-24 | 37.32 | Minor | Below G1 | Solar minimum |
+| **Pipeline 2009** | 2009-06-24 | **28.14** | Minor ⬅ Min | Below G1 | Solar minimum |
+| **Pipeline 2010** | 2010-08-04 | 62.95 | Minor | G1 | Solar minimum |
+| **Pipeline 2011** | 2011-10-25 | 80.10 | Minor | G1 | Rising phase |
+| **Pipeline 2012** | 2012-10-09 | 111.25 | Moderate | G2 | Rising phase |
+| **Pipeline 2013** | 2013-10-02 | 112.47 | Moderate | G2 | Solar maximum |
+| **Pipeline 2014** | 2014-09-12 | 76.44 | Minor | G1 | Solar maximum |
+| **Pipeline 2015** | 2015-03-17 | 323.52 | Strong | G3 | Declining phase |
+| **Pipeline 2016** | 2016-07-19 | 81.13 | Minor | G1 | Declining phase |
+| **Pipeline 2017** | 2017-09-08 | 107.27 | Moderate | G2 | Declining phase |
+
+### Severity Distribution Across 22 Test Years
+
+| Category | dBHt Range | Count | Years |
+|---|---|---:|---|
+| Minor | 0–100 | 9 | 1996, 2007, 2008, 2009, 2010, 2011, 2014, 2016 |
+| Moderate | 100–250 | 6 | 1997, 1999, 2002, 2006, 2012, 2013, 2017 |
+| Strong | 250–400 | 2 | 2001, 2015 |
+| Severe/Extreme | > 400 | 5 | 1998, 2000, 2003, 2004, 2005 |
+
+---
+
+## 🤖 Modeling Roadmap
+
+The project follows a 5-phase progression from interpretable baselines to advanced self-supervised architectures.
+
+### Phase 1 — Baseline Statistical Models
+> Establish interpretable forecasting baselines
+
+| Model | Framework |
+|---|---|
+| Linear Regression | scikit-learn |
+| Ridge Regression | scikit-learn |
+| Elastic Net | scikit-learn |
+
+### Phase 2 — Tree-Based Machine Learning
+> Develop strong non-linear baselines; expected best performance on tabular data
+
+| Model | Framework |
+|---|---|
+| Decision Tree Regressor | scikit-learn |
+| Random Forest Regressor | scikit-learn |
+| XGBoost Regressor | XGBoost |
+| LightGBM Regressor | LightGBM |
+| CatBoost Regressor | CatBoost |
+
+> **XGBoost with cross-year backtesting is the expected strongest initial benchmark.**
+> Tree-based models excel under heterogeneous feature distributions, non-linear dynamics,
+> and mixed temporal signals typical of space-weather tabular data.
+
+### Phase 3 — Sequential Deep Learning
+> Capture temporal dependencies, sequential storm dynamics, and storm evolution patterns
+
+| Model | Architecture | Framework |
+|---|---|---|
+| Simple LSTM | Single-layer recurrent | PyTorch |
+| Stacked LSTM | Multi-layer deep recurrent | PyTorch |
+| Bidirectional LSTM | Forward + backward passes | PyTorch |
+| GRU | Gated Recurrent Unit | PyTorch |
+| CNN-LSTM | 1D convolution + LSTM | PyTorch |
+| Attention-LSTM | LSTM + learned attention weights | PyTorch |
+
+### Phase 4 — Transformer-Based Models
+> Improve long-context temporal learning and attention-based sequence modeling
+
+| Model | Architecture | Framework |
+|---|---|---|
+| Transformer Encoder | Multi-head self-attention | PyTorch |
+| Temporal Attention Networks | Time-aware attention | PyTorch |
+| Temporal Fusion Transformer (TFT) | Multi-horizon gated attention | PyTorch |
+
+### Phase 5 — JEPA Self-Supervised Framework
+> Learn robust latent representations of geomagnetic temporal dynamics without label supervision
+
+Rather than predicting raw dBHt directly, JEPA learns latent embeddings that model temporal structure and sequential context, then fine-tunes for downstream tasks.
+
+```
+Input sequence (solar wind + geomagnetic measurements + temporal context)
+        │
+        ▼
+   Encoder → Latent storm representations + hidden temporal dynamics
+        │
+        ▼
+   Predictor → Future latent representations
+        │
+        ▼
+   Downstream fine-tuning:
+        ├── dBHt regression
+        ├── Storm severity classification
+        └── Operational forecasting
+```
+
+**Why JEPA adds scientific value:**
+- Stronger latent temporal modeling than traditional LSTMs
+- Reduced overfitting to specific storm events
+- Improved generalization across solar-cycle phases
+- Better robustness to temporal drift and distributional shift
+- Enhanced rare-event signal extraction
+
+---
+
+## 📊 Evaluation Metrics
+
+### Regression Metrics (Track A — Storm Prediction)
+
+| Metric | Description |
+|---|---|
+| **RMSE** | Root Mean Squared Error |
+| **MAE** | Mean Absolute Error |
+| **R² Score** | Coefficient of Determination |
+
+### Classification Metrics (Severity Benchmarking)
+
+| Metric | Description |
+|---|---|
+| **Precision** | True positive rate among predicted storm events |
+| **Recall** | Coverage of actual storm events |
+| **F1 Score** | Harmonic mean of precision and recall |
+| **PR-AUC** | Area under Precision–Recall curve |
+| **Confusion Matrix** | Full severity class breakdown |
+
+### Operational Metrics (Track B — Quiet-Period Stability)
+
+| Metric | Description |
+|---|---|
+| **False Positive Rate** | Spurious storm alerts during quiet periods |
+| **Quiet-Time Stability** | Prediction variance during non-storm intervals |
+| **Storm Detection Rate** | Coverage of actual storm onset events |
+| **Cross-Year Generalization** | Performance degradation across test years |
+
+---
+
+## 📉 Distributional Shift Analysis
+
+Geomagnetic activity changes seasonally, across solar cycles, and across storm intensities. The project quantifies temporal drift per year-pipeline:
+
+| Method | What it Measures |
+|---|---|
+| **Histogram Comparison** | Visual frequency distribution drift vs. 1995 training data |
+| **KL Divergence** | Information-theoretic distance between distributions |
+| **Wasserstein Distance** | Earth Mover's Distance — robust to non-overlapping distributions |
+| **PSI** | Model health: < 0.1 stable · 0.1–0.25 monitor · > 0.25 significant shift |
+
+---
+
+## 🧪 Statistical Validation
+
+### Pairwise Model Comparison — t-tests
+
+- XGBoost vs. Random Forest
+- LSTM vs. XGBoost
+- JEPA vs. Transformer Encoder
+
+### Multi-Model Comparison — ANOVA
+
+- All models compared across storm severity groups
+- All models compared across solar-cycle phases (minimum, rising, maximum, declining)
+
+---
+
+## 🗺️ Research Timeline
+
+| Stage | Activity |
+|---:|---|
+| **1** | Data preprocessing and storm window extraction |
+| **2** | Feature engineering and baseline statistical models |
+| **3** | Tree-based model benchmarking |
+| **4** | Cross-year backtesting experiments |
+| **5** | Quiet-period operational testing |
+| **6** | Sequential deep learning implementation (PyTorch) |
+| **7** | Transformer-based forecasting |
+| **8** | JEPA self-supervised representation learning |
+| **9** | Statistical validation and comparative analysis |
+| **10** | Research documentation and publication preparation |
+
+---
+
+## 🚀 Expected Research Contributions
+
+1. Comprehensive cross-year benchmark of classical, deep learning, and self-supervised models under real operational constraints
+2. Quantified model degradation profiles driven by solar-cycle distributional shift across 22 year-pipelines
+3. Operational false-positive analysis during geomagnetically quiet periods
+4. A reproducible JEPA-based self-supervised framework for rare-event prediction in nonstationary geophysical time series
+5. Evidence-based guidance for operational space-weather forecasting system design
+
+---
+
+## 📁 Project Structure
+
+```
+geomagnetic-storm-prediction/
 ├── data/
-│   ├── raw/                        # downloaded OMNI / WDC files
-│   ├── yearly/                     # storm_YYYY.csv per year
-│   └── processed/                  # feature-engineered datasets
+│   ├── raw/                              # Raw OMNI/NOAA data (1995–2017)
+│   ├── processed/
+│   │   ├── storm_windows/               # Per-year storm event windows (Track A)
+│   │   └── quiet_windows/               # Per-year quiet-period windows (Track B)
+│   └── shift/                            # Distributional shift outputs
 │
-├── notebooks/
-│   ├── 01_eda_phases.ipynb         # EDA + storm phase segmentation
-│   ├── 02_extreme_values.ipynb     # Extreme value analysis (POT + GPD)
-│   ├── 03_features_ccf.ipynb       # Feature engineering + CCF
-│   ├── 04_baseline_models.ipynb    # Tree-based models + §8 chapter exercises
-│   ├── 05_deep_learning.ipynb      # LSTM / GRU / CNN-LSTM
-│   ├── 06_cross_year_experiments.ipynb   # 506-pair evaluation matrix
-│   └── 07_solar_cycle_analysis.ipynb    # Cycle-phase transfer analysis
+├── yearly_training/
+│   ├── 1995_notebook.ipynb               # Training anchor
+│   ├── 1996_notebook.ipynb
+│   ├── ...
+│   └── 2017_notebook.ipynb
 │
-├── src/
-│   ├── data_loader.py              # Download + parse OMNI data
-│   ├── storm_catalog.py            # Build storm event catalog
-│   ├── features.py                 # All feature engineering functions
-│   ├── models.py                   # Model definitions and wrappers
-│   ├── evaluate.py                 # Metrics and distributional shift
-│   └── experiment_runner.py        # 506-pair cross-year loop
+├── storm_severity/
+│   ├── minor_0_100.ipynb
+│   ├── moderate_100_250.ipynb
+│   ├── strong_250_400.ipynb
+│   └── severe_gt_400.ipynb
+│
+├── pipelines/
+│   ├── year_pipeline.py                  # Shared class: Track A + Track B
+│   └── run_all_years.py                  # Iterates 1996–2017
+│
+├── baseline_models/
+│   ├── linear_regression.ipynb
+│   ├── random_forest.ipynb
+│   ├── xgboost.ipynb
+│   └── lightgbm.ipynb
+│
+├── deep_learning/
+│   ├── lstm.ipynb                        # PyTorch LSTM variants
+│   ├── gru.ipynb
+│   ├── transformer.ipynb
+│   └── jepa.ipynb                        # JEPA self-supervised framework
+│
+├── models/
+│   ├── ml/                               # scikit-learn / XGBoost / LightGBM / CatBoost
+│   └── dl/                              # PyTorch model definitions
+│
+├── evaluation/
+│   ├── rmse_analysis.ipynb
+│   ├── statistical_tests.ipynb
+│   ├── distribution_shift.ipynb
+│   └── quiet_period_analysis.ipynb
 │
 ├── results/
-│   ├── cross_year_matrix/          # PR-AUC matrix (23 × 23)
-│   ├── shift_analysis/             # KL / Wasserstein per year pair
-│   └── figures/                    # All publication figures
+│   ├── track_a/                          # Per-year storm prediction results
+│   ├── track_b/                          # Per-year quiet-period results
+│   └── figures/
 │
-├── requirements.txt
-└── README.md                       # this file
+└── README.md
 ```
 
 ---
 
-## Timeline
+## 🔧 Framework & Environment
 
-| Week | Task |
+| Component | Choice |
 |---|---|
-| 1–3 | Data preparation: download OMNI, build storm catalog, extract yearly CSVs |
-| 4–6 | Baseline models: logistic regression, decision tree, random forest on 2015 |
-| 7–9 | Cross-year experiments: run 506 evaluations, build result matrix |
-| 10–12 | Deep learning: LSTM, GRU, CNN-LSTM |
-| 13–14 | Distributional shift analysis + solar cycle grouping |
-| 15–16 | Final reporting, figures, interpretation |
+| **Deep learning** | PyTorch |
+| **Tree-based ML** | scikit-learn, XGBoost, LightGBM, CatBoost |
+| **Self-supervised** | PyTorch (JEPA custom implementation) |
+| **Data processing** | pandas, NumPy |
+| **Evaluation & stats** | scipy, scikit-learn metrics |
+| **Visualization** | matplotlib, seaborn |
 
 ---
 
-## Final Deliverables
+## 📚 References & Data Sources
 
-### Technical
-
-- Cleaned yearly datasets (`data/yearly/storm_YYYY.csv`)
-- Preprocessing and feature engineering pipeline (`src/features.py`)
-- Trained model weights for all 23 years × 6+ model types
-- 23 × 23 cross-year PR-AUC evaluation matrix
-- Distributional shift distance matrix (Wasserstein, KL, PSI)
-
-### Research
-
-- Literature review on geomagnetic storm prediction and transfer learning
-- Methodology writeup: storm window construction, feature rationale, experimental design
-- Model comparison: tree-based vs deep learning under distributional shift
-- Distribution shift findings: which feature drifts most across the solar cycle?
-- Explainability analysis: SHAP values, feature importance across years
-- Final report and presentation figures
+- [NOAA Space Weather Scales](https://www.spaceweather.gov/noaa-scales-explanation) — G1–G5 scale definitions
+- Solar Cycle reference: Cycles 22, 23, and 24 span the 1995–2017 study period
 
 ---
 
-## Key References
-
-- Burton, R. K. et al. (1975) — Ring current injection model (dDst/dt equation)
-- Dst and Kp indices — WDC for Geomagnetism, Kyoto: http://wdc.kugi.kyoto-u.ac.jp
-- OMNI solar wind data — NASA OMNIWeb: https://omniweb.gsfc.nasa.gov
-- Pulkkinen et al. (2013) — GIC review and dBHt as primary risk metric
-- Camporeale (2019) — ML review for space weather prediction
-
+*22 year-pipelines · 5-phase modeling roadmap · 10-stage research timeline · Training anchor: April 1995 · Framework: PyTorch*
